@@ -30,6 +30,32 @@ def check_and_increment(store: Dict, user_id: str, limit: int) -> bool:
 
 load_dotenv()
 
+# Download FAISS index from Hugging Face if not present locally
+def ensure_faiss_index():
+    import os
+    if os.path.exists("faiss_index_cleaned/index.faiss"):
+        return
+    print("Downloading FAISS index from Hugging Face...")
+    from huggingface_hub import hf_hub_download
+    os.makedirs("faiss_index_cleaned", exist_ok=True)
+    hf_hub_download(
+        repo_id=os.getenv("HF_REPO_ID"),
+        filename="index.faiss",
+        repo_type="dataset",
+        token=os.getenv("HF_TOKEN"),
+        local_dir="faiss_index_cleaned",
+    )
+    hf_hub_download(
+        repo_id=os.getenv("HF_REPO_ID"),
+        filename="index.pkl",
+        repo_type="dataset",
+        token=os.getenv("HF_TOKEN"),
+        local_dir="faiss_index_cleaned",
+    )
+    print("FAISS index downloaded!")
+
+ensure_faiss_index()
+
 app = FastAPI(title="Nur Backend", version="1.0.0")
 
 app.add_middleware(
