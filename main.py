@@ -1,10 +1,12 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from prompt.prompts import SYSTEM
-import os
 import json
 import asyncio
 from datetime import date
@@ -249,12 +251,69 @@ async def stream_agent_response(messages: List[Message], thread_id: str, user_me
     yield f"data: {json.dumps({'done': True})}\n\n"
 
 
-async def stream_simple(prompt: str):
+async def stream_tafsir_agent(surah: str, ayah: int, arabic: str, translation: str):
     from langchain_core.messages import HumanMessage, SystemMessage
-    _, _, _, llm_stream = get_agent()
-    full_messages = [SystemMessage(content=SYSTEM), HumanMessage(content=prompt)]
-    async for chunk in llm_stream.astream(full_messages):
+
+    loop = asyncio.get_event_loop()
+
+    # Load agent in thread so it doesn't block the event loop
+    _, retriever, _, llm_stream = await loop.run_in_executor(None, get_agent)
+
+    # Retrieve relevant FAISS context in thread
+    query = f"tafsir {surah} ayah {ayah} {translation[:60]}"
+    docs = await loop.run_in_executor(None, retriever.invoke, query)
+    context = "\n".join([doc.page_content for doc in docs[:2]]) if docs else ""
+
+    tafsir_system = (
+        "You are Nur, a knowledgeable Islamic scholar AI. "
+        "Give a concise, spiritually uplifting tafsir in 2-3 sentences. "
+        "Mention one classical scholar (Ibn Kathir, Al-Tabari, or Al-Qurtubi) naturally. "
+        "Warm, scholarly tone. No bullet points. "
+        "Respond in the EXACT same language as the translation provided."
+    )
+
+    user_prompt = (
+        f"Surah {surah}, Ayah {ayah}:\n"
+        f"Arabic: \"{arabic}\"\nTranslation: \"{translation}\"\n"
+    )
+    if context:
+        user_prompt += f"\nRelevant Islamic knowledge:\n{context}\n"
+
+    messages = [SystemMessage(content=tafsir_system), HumanMessage(content=user_prompt)]
+
+    async for chunk in llm_stream.astream(messages):
         token = chunk.content
+        if token:
+            yield f"data: {json.dumps({'token': token})}\n\n"
+            await asyncio.sleep(0)
+    yield f"data: {json.dumps({'done': True})}\n\n"
+
+
+_openai_client = None
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        from openai import AsyncOpenAI
+        _openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _openai_client
+
+async def stream_simple(prompt: str, system: str = None, max_tokens: int = None):
+    client = get_openai_client()
+    kwargs = dict(
+        model="gpt-4o-mini",
+        temperature=0.3,
+        stream=True,
+        messages=[
+            {"role": "system", "content": system or SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
+    stream = await client.chat.completions.create(**kwargs)
+    async for chunk in stream:
+        token = chunk.choices[0].delta.content
         if token:
             yield f"data: {json.dumps({'token': token})}\n\n"
             await asyncio.sleep(0)
@@ -422,51 +481,58 @@ async def analyze_halal_image(req: HalalImageRequest):
         if "," in image_data:
             image_data = image_data.split(",")[1]
 
-        prompt = """Look at this ingredients label image. Extract all ingredients and analyze if the product is halal.
+        prompt = """You are an expert halal food analyst. Carefully examine this ingredients label image.
 
-        Respond ONLY in this exact JSON format:
+        Step 1: Extract ALL visible text from the ingredients list — read every word carefully.
+        Step 2: Identify the product name if visible.
+        Step 3: Analyze each ingredient against Islamic halal guidelines.
+
+        HARAM ingredients (forbidden): pork, pig, swine, lard, gelatin (unless labeled fish/plant/halal),
+        alcohol, wine, beer, ethanol, blood, carmine, cochineal, E120, E441, ham, bacon, pepperoni,
+        animal rennet, L-cysteine from hair (E920).
+
+        DOUBTFUL ingredients (mashbooh): natural flavors, artificial flavors, mono and diglycerides (E471),
+        E472, E473, E474, E475, whey, casein, vanilla extract, lecithin (E322), E476, gelatin (source unknown).
+
+        Respond ONLY in this exact JSON format with no extra text:
         {
           "status": "halal" or "haram" or "doubtful",
-          "productName": "product name if visible",
-          "ingredients": "full ingredients text you can read",
-          "found": ["list of concerning ingredients"],
-          "verdict": "one sentence verdict",
-          "explanation": "2-3 sentence explanation of why it is halal/haram/doubtful"
-        }
+          "productName": "product name if visible, else Unknown",
+          "ingredients": "full ingredients text exactly as you read it",
+          "found": ["list of specific concerning ingredients found"],
+          "verdict": "clear one sentence verdict",
+          "explanation": "2-3 sentences explaining the halal status with specific reasons"
+        }"""
 
-        Haram: pork, lard, gelatin (unless fish/plant), alcohol, blood, carmine (E120).
-        Doubtful: natural flavors, E471, E472, mono/diglycerides, rennet, L-cysteine (E920)."""
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-        import anthropic
-        client = anthropic.Anthropic()
-        
-        # 2. Use a valid model name (3.5 Sonnet is best for OCR/Vision)
-        message = client.messages.create(
-            model="claude-3-5-sonnet-20240620", 
-            max_tokens=1024,
-            messages=[
-                {
+        def _call():
+            return client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=1024,
+                messages=[{
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_data,
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                                "detail": "high",
                             },
                         },
                         {
                             "type": "text",
-                            "text": prompt
-                        }
+                            "text": prompt,
+                        },
                     ],
-                }
-            ],
-        )
-        
+                }],
+            )
+
+        message = await asyncio.get_event_loop().run_in_executor(None, _call)
+
         # 3. Robust JSON parsing
-        text = message.content[0].text
+        text = message.choices[0].message.content
         # Remove markdown code blocks if the model included them
         clean = text.replace('```json', '').replace('```', '').strip()
         result = json.loads(clean)
