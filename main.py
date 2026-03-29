@@ -30,31 +30,6 @@ def check_and_increment(store: Dict, user_id: str, limit: int) -> bool:
 
 load_dotenv()
 
-# Download FAISS index from Hugging Face if not present locally
-def ensure_faiss_index():
-    import os
-    if os.path.exists("faiss_index_cleaned/index.faiss"):
-        return
-    print("Downloading FAISS index from Hugging Face...")
-    from huggingface_hub import hf_hub_download
-    os.makedirs("faiss_index_cleaned", exist_ok=True)
-    hf_hub_download(
-        repo_id=os.getenv("HF_REPO_ID"),
-        filename="index.faiss",
-        repo_type="dataset",
-        token=os.getenv("HF_TOKEN"),
-        local_dir="faiss_index_cleaned",
-    )
-    hf_hub_download(
-        repo_id=os.getenv("HF_REPO_ID"),
-        filename="index.pkl",
-        repo_type="dataset",
-        token=os.getenv("HF_TOKEN"),
-        local_dir="faiss_index_cleaned",
-    )
-    print("FAISS index downloaded!")
-
-ensure_faiss_index()
 
 app = FastAPI(title="Nur Backend", version="1.0.0")
 
@@ -96,14 +71,19 @@ def get_agent():
     from typing import TypedDict, Annotated
     import requests as http_requests
 
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    vector_store = FAISS.load_local(
-        folder_path=FAISS_INDEX_PATH,
-        embeddings=embeddings,
-        index_name="index",
-        allow_dangerous_deserialization=True
-    )
-    _retriever = vector_store.as_retriever()
+    try:
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        vector_store = FAISS.load_local(
+            folder_path=FAISS_INDEX_PATH,
+            embeddings=embeddings,
+            index_name="index",
+            allow_dangerous_deserialization=True
+        )
+        _retriever = vector_store.as_retriever()
+        print("FAISS index loaded.")
+    except Exception:
+        print("FAISS index not found — running without RAG.")
+        _retriever = None
 
     def kalimat_search(query: str, content_type: str):
         response = http_requests.get(
@@ -117,6 +97,8 @@ def get_agent():
     @tool
     def jurisprudence_query(query: str):
         """Query the Islamic jurisprudence knowledge base."""
+        if _retriever is None:
+            return "Knowledge base not available."
         docs = _retriever.invoke(query)
         return "\n".join([doc.page_content for doc in docs])
 
