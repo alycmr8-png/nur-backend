@@ -33,6 +33,19 @@ load_dotenv()
 
 app = FastAPI(title="Nur Backend", version="1.0.0")
 
+@app.on_event("startup")
+async def keep_alive():
+    import httpx
+    async def ping():
+        while True:
+            await asyncio.sleep(14 * 60)
+            try:
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://nur-backend-2.onrender.com/health")
+            except Exception:
+                pass
+    asyncio.create_task(ping())
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -123,8 +136,8 @@ def get_agent():
     _llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
     llm_with_tools = _llm.bind_tools(tools)
 
-    # gpt-4o-mini for streaming (fast, cheap, good enough)
-    _llm_stream = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, streaming=True)
+    # gpt-4o for streaming (fast, cheap, good enough)
+    _llm_stream = ChatOpenAI(model="gpt-4o", temperature=0.3, streaming=True)
 
     class AgentState(TypedDict):
         messages: Annotated[List, add_messages]
@@ -197,57 +210,18 @@ def build_memory_context(user_memory=None, convo_summaries=None):
 
 # ── Streaming: full conversation history ──────────────────────────────────────
 async def stream_agent_response(messages: List[Message], thread_id: str, user_memory=None, convo_summaries=None):
-    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-    chatbot, _, _, llm_stream = get_agent()
+    _, _, _, llm_stream = get_agent()
     memory_context = build_memory_context(user_memory, convo_summaries)
     system_with_memory = SYSTEM + memory_context
-    last_user_msg = next((m.content for m in reversed(messages) if m.role == "user"), "")
-
-    # Only use tools for deep Islamic knowledge queries
-    tool_keywords = [
-        'hadith', 'quran verse', 'surah', 'ayah', 'ruling', 'fiqh',
-        'fatwa', 'haram ruling', 'halal ruling', 'scholar said',
-        'madhab', 'daleel', 'evidence from', 'proof from', 'sunnah of'
-    ]
-    use_tools = any(word in last_user_msg.lower() for word in tool_keywords)
-
     # Build full conversation history
     full_messages = [SystemMessage(content=system_with_memory)]
-    for m in messages[:-1]:
+    for m in messages:
         if m.role == "user":
             full_messages.append(HumanMessage(content=m.content))
         elif m.role == "assistant":
             full_messages.append(AIMessage(content=m.content))
-
-    if use_tools:
-        config = {"configurable": {"thread_id": thread_id}}
-        try:
-            loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: chatbot.invoke({"messages": HumanMessage(content=last_user_msg)}, config=config)
-                ),
-                timeout=8.0
-            )
-            tool_context = []
-            for m in result["messages"]:
-                if isinstance(m, ToolMessage):
-                    tool_context.append(str(m.content))
-            research = "\n\n---\n\n".join(tool_context) if tool_context else ""
-        except asyncio.TimeoutError:
-            print("Tool search timed out")
-            research = ""
-        except Exception as e:
-            print(f"Tool error: {e}")
-            research = ""
-
-        final_msg = f"{last_user_msg}\n\nResearch from Islamic sources:\n{research}" if research else last_user_msg
-    else:
-        final_msg = last_user_msg
-
-    full_messages.append(HumanMessage(content=final_msg))
 
     # Stream with fast model
     async for chunk in llm_stream.astream(full_messages):
@@ -273,10 +247,11 @@ async def stream_tafsir_agent(surah: str, ayah: int, arabic: str, translation: s
     context = "\n".join([doc.page_content for doc in docs[:2]]) if docs else ""
 
     tafsir_system = (
-        "You are Nur, a knowledgeable Islamic scholar AI. "
-        "Give a concise, spiritually uplifting tafsir in 2-3 sentences. "
-        "Mention one classical scholar (Ibn Kathir, Al-Tabari, or Al-Qurtubi) naturally. "
-        "Warm, scholarly tone. No bullet points. "
+        "You are Nur, an Islamic scholar who explains the Quran through its classical tradition. "
+        "For every verse: first give the revelation context (asbab al-nuzul — when, why, and for whom it was revealed), "
+        "then explain the verse through the lens of classical scholars (Ibn Kathir, Al-Tabari, Al-Qurtubi, Ibn Ashur, Al-Razi — use 2-3 naturally). "
+        "The entire response must read as one cohesive, flowing explanation — no headers, no bullet points, no numbered lists. "
+        "Pure scholarly tafsir in human, readable prose. 5-7 sentences. "
         "Respond in the EXACT same language as the translation provided."
     )
 
@@ -297,31 +272,14 @@ async def stream_tafsir_agent(surah: str, ayah: int, arabic: str, translation: s
     yield f"data: {json.dumps({'done': True})}\n\n"
 
 
-_openai_client = None
-
-def get_openai_client():
-    global _openai_client
-    if _openai_client is None:
-        from openai import AsyncOpenAI
-        _openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    return _openai_client
-
 async def stream_simple(prompt: str, system: str = None, max_tokens: int = None):
-    client = get_openai_client()
-    kwargs = dict(
-        model="gpt-4o-mini",
-        temperature=0.3,
-        stream=True,
-        messages=[
-            {"role": "system", "content": system or SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    if max_tokens:
-        kwargs["max_tokens"] = max_tokens
-    stream = await client.chat.completions.create(**kwargs)
-    async for chunk in stream:
-        token = chunk.choices[0].delta.content
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.3, streaming=True)
+    messages = [SystemMessage(content=system or SYSTEM), HumanMessage(content=prompt)]
+    async for chunk in llm.astream(messages):
+        token = chunk.content
         if token:
             yield f"data: {json.dumps({'token': token})}\n\n"
             await asyncio.sleep(0)
@@ -362,18 +320,16 @@ async def explain_verse(req: VerseExplainRequest):
         if not check_and_increment(_tafsir_limits, req.user_id, FREE_TAFSIR_LIMIT):
             raise HTTPException(status_code=429, detail="Daily tafsir limit reached. Upgrade to Pro for unlimited explanations.")
     prompt = (
-        f'You are Nur, a deeply knowledgeable Islamic scholar AI. '
-        f'Provide a rich, spiritually uplifting tafsir for Surah {req.surah}, Ayah {req.ayah}:\n'
+        f'You are Nur, an Islamic scholar explaining the Quran through its classical tradition. '
+        f'Give the tafsir for Surah {req.surah}, Ayah {req.ayah}:\n'
         f'Arabic: "{req.arabic}"\nTranslation: "{req.translation}"\n\n'
-        f'Structure your tafsir in this order:\n'
-        f'1. The core meaning of the ayah — what Allah is conveying\n'
-        f'2. Historical/revelation context (asbab al-nuzul) if known\n'
-        f'3. Insights from AT LEAST 2 classical scholars — you MUST name them explicitly. '
-        f'Choose from: Ibn Kathir, Imam Al-Tabari, Imam Al-Qurtubi, Imam Al-Baghawi, Ibn Ashur, Al-Razi, Al-Zamakhshari. '
-        f'Show the diversity of scholarly thought — do not give only one perspective.\n'
-        f'4. A practical, actionable lesson for daily Muslim life today\n\n'
-        f'Write in flowing, connected prose (not bullet points). 5-7 sentences total. '
-        f'Be warm, scholarly, and spiritually engaging.\n'
+        f'Your explanation must cover: '
+        f'(1) the revelation context — when, why, and for whom this verse was revealed (asbab al-nuzul), '
+        f'(2) the interpretation of this verse through 2-3 classical scholars, '
+        f'choosing naturally from Ibn Kathir, Al-Tabari, Al-Qurtubi, Ibn Ashur, Al-Razi. '
+        f'Write as one cohesive, flowing scholarly explanation. '
+        f'No headers, no bullet points, no numbered lists. Pure tafsir in readable human prose. '
+        f'5-7 sentences. '
         f'CRITICAL: Respond in the EXACT same language as the translation above. '
         f'If translation is French → respond in French. If English → respond in English.'
     )
