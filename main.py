@@ -330,6 +330,7 @@ async def explain_verse(req: VerseExplainRequest):
         f'Write as one cohesive, flowing scholarly explanation. '
         f'No headers, no bullet points, no numbered lists. Pure tafsir in readable human prose. '
         f'5-7 sentences. '
+        f'CRITICAL: Do NOT start with Bismillah, As-salamu alaykum, or any greeting. Start directly with the tafsir content. '
         f'CRITICAL: Respond in the EXACT same language as the translation above. '
         f'If translation is French → respond in French. If English → respond in English.'
     )
