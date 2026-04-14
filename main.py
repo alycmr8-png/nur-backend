@@ -392,6 +392,17 @@ async def reflection_prompt(req: ReflectionRequest):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+@app.get("/api/test-google")
+async def test_google():
+    import httpx
+    GOOGLE_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "NO_KEY")
+    url = "https://places.googleapis.com/v1/places:searchText"
+    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY, "X-Goog-FieldMask": "places.displayName,places.id"}
+    payload = {"textQuery": "halal restaurant new york", "maxResultCount": 3}
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload, headers=headers)
+    return {"key_prefix": GOOGLE_KEY[:10], "status_code": response.status_code, "raw": response.json()}
+
 @app.get("/api/halal-finder")
 async def halal_finder(lat: float, lng: float, query: str, radius: int = 5000):
     import httpx
