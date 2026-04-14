@@ -414,7 +414,7 @@ async def halal_finder(lat: float, lng: float, query: str, radius: int = 5000):
         "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.currentOpeningHours,places.location,places.id",
     }
     payload = {
-        "textQuery": query,
+        "textQuery": f"{query} near me",
         "locationBias": {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
@@ -422,6 +422,7 @@ async def halal_finder(lat: float, lng: float, query: str, radius: int = 5000):
             }
         },
         "maxResultCount": 20,
+        "languageCode": "en",
     }
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
