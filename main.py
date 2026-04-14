@@ -392,17 +392,6 @@ async def reflection_prompt(req: ReflectionRequest):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-@app.get("/api/test-google")
-async def test_google():
-    import httpx
-    GOOGLE_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "NO_KEY")
-    url = "https://places.googleapis.com/v1/places:searchText"
-    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY, "X-Goog-FieldMask": "places.displayName,places.id"}
-    payload = {"textQuery": "halal restaurant new york", "maxResultCount": 3}
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=headers)
-    return {"key_prefix": GOOGLE_KEY[:10], "status_code": response.status_code, "raw": response.json()}
-
 @app.get("/api/halal-finder")
 async def halal_finder(lat: float, lng: float, query: str, radius: int = 5000):
     import httpx
@@ -424,22 +413,28 @@ async def halal_finder(lat: float, lng: float, query: str, radius: int = 5000):
         "maxResultCount": 20,
         "languageCode": "en",
     }
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=headers)
-        data = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            data = response.json()
+    except Exception:
+        return {"results": [], "status": "OK"}
     places = []
     for p in data.get("places", []):
-        places.append({
-            "place_id": p.get("id", ""),
-            "name": p.get("displayName", {}).get("text", ""),
-            "vicinity": p.get("formattedAddress", ""),
-            "rating": p.get("rating"),
-            "opening_hours": {"open_now": p.get("currentOpeningHours", {}).get("openNow")},
-            "geometry": {"location": {
-                "lat": p.get("location", {}).get("latitude", 0),
-                "lng": p.get("location", {}).get("longitude", 0),
-            }},
-        })
+        try:
+            places.append({
+                "place_id": p.get("id", ""),
+                "name": p.get("displayName", {}).get("text", ""),
+                "vicinity": p.get("formattedAddress", ""),
+                "rating": p.get("rating"),
+                "opening_hours": {"open_now": p.get("currentOpeningHours", {}).get("openNow")},
+                "geometry": {"location": {
+                    "lat": p.get("location", {}).get("latitude", 0),
+                    "lng": p.get("location", {}).get("longitude", 0),
+                }},
+            })
+        except Exception:
+            continue
     return {"results": places, "status": "OK"}
 
 # ── Halal image analysis ───────────────────────────────────────────────────────
